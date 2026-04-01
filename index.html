@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Teacher Printer Sale</title>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@3.28.1/lib/msal-browser.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -21,8 +22,13 @@
   .hdr-in { max-width:860px; margin:0 auto; display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
   .hdr h1 { font-size:21px; font-weight:700; color:var(--gold); margin-bottom:2px; }
   .hdr p { font-size:12px; color:rgba(255,255,255,0.6); }
+  .auth-area { display:flex; align-items:center; gap:10px; flex-shrink:0; }
   .user-chip { background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.2); border-radius:20px; padding:5px 12px; font-size:12px; color:white; display:flex; align-items:center; gap:6px; }
   .u-dot { width:7px; height:7px; border-radius:50%; background:#4ade80; flex-shrink:0; }
+  .btn-si { background:var(--gold); color:var(--gd); border:none; border-radius:var(--rs); padding:8px 18px; font-size:13px; font-weight:700; cursor:pointer; font-family:inherit; transition:background .15s; }
+  .btn-si:hover { background:#f5d060; }
+  .btn-so { background:transparent; color:rgba(255,255,255,0.55); border:1px solid rgba(255,255,255,0.2); border-radius:var(--rs); padding:5px 12px; font-size:12px; cursor:pointer; font-family:inherit; }
+  .btn-so:hover { color:white; }
 
   .sbar { background:var(--gm); padding:9px 24px; }
   .sbar-in { max-width:860px; margin:0 auto; display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
@@ -38,6 +44,12 @@
 
   .main { max-width:860px; margin:0 auto; padding:22px; }
   .err-box { background:#fef2f2; border:1px solid #fca5a5; border-radius:var(--r); padding:14px 18px; margin-bottom:14px; font-size:13px; color:#991b1b; display:none; }
+
+  .login-wall { text-align:center; padding:60px 24px; background:white; border-radius:var(--r); border:1px solid var(--border); }
+  .login-wall h2 { font-size:18px; font-weight:700; margin-bottom:8px; color:var(--gd); }
+  .login-wall p { color:var(--text-m); margin-bottom:24px; font-size:14px; }
+  .btn-si-lg { background:var(--gd); color:white; border:none; border-radius:var(--rs); padding:12px 28px; font-size:15px; font-weight:700; cursor:pointer; font-family:inherit; }
+  .btn-si-lg:hover { background:var(--gm); }
 
   .grp { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--text-l); margin:26px 0 10px; padding-bottom:7px; border-bottom:1px solid var(--border); }
   .grp:first-child { margin-top:0; }
@@ -96,8 +108,8 @@
       <h1>Teacher Printer Sale</h1>
       <p>ILS staff only &nbsp;·&nbsp; Claim a printer below &nbsp;·&nbsp; Updates live for everyone</p>
     </div>
-    <div class="user-chip" id="user-chip" style="display:none">
-      <div class="u-dot"></div><span id="user-name"></span>
+    <div class="auth-area" id="auth-area">
+      <button class="btn-si" onclick="signIn()">Sign in with Microsoft</button>
     </div>
   </div>
 </div>
@@ -134,8 +146,13 @@
 <div class="toast" id="toast"></div>
 
 <script>
-const SITE_URL  = 'https://ilsroyals.sharepoint.com/sites/ilsforms';
-const LIST_NAME = 'PrinterClaims';
+const CLIENT_ID  = 'cfad736d-bf0f-4306-94fe-1b7a02a522f2';
+const TENANT_ID  = '8109e949-d281-46a4-af75-b18087925bf4';
+const REDIRECT   = 'https://orojas119.github.io/printer-catalog/';
+const SITE_HOST  = 'ilsroyals.sharepoint.com';
+const SITE_PATH  = '/sites/ilsforms';
+const LIST_NAME  = 'PrinterClaims';
+const SCOPES     = ['Sites.ReadWrite.All', 'User.Read'];
 
 const PRINTERS = [
   {id:'p1', g:'Group 1: Large & premium', name:'HP PageWide Pro MFP 577 dw', price:135, market:460, disc:71, toner:'972/976 XL', tCost:125, carts:7, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c05016569.png?imdensity=1&impolicy=Png_Res'},
@@ -151,83 +168,152 @@ const PRINTERS = [
   {id:'p11',g:'Group 3: Budget / older models', name:'HP LaserJet 1536dnf MFP', price:28, market:50, disc:44, toner:'78A', tCost:35, carts:0, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c02944267.png'},
 ];
 
-let claims = {}, itemIds = {}, digest = '', currentUser = '', pendingId = null;
+let msalInstance = null;
+let currentUser = '', currentAccount = null;
+let siteId = null, listId = null;
+let claims = {}, itemIds = {};
+let pendingId = null;
 
-async function spGet(path) {
-  const r = await fetch(SITE_URL + path, {
-    headers: {'Accept':'application/json;odata=nometadata'},
-    credentials: 'include'
-  });
-  if (!r.ok) throw new Error('GET ' + path + ' failed: ' + r.status);
-  return r.json();
+// ── MSAL ────────────────────────────────────────────────────────
+async function boot() {
+  ss('spin', 'connecting...');
+  try {
+    msalInstance = new msal.PublicClientApplication({
+      auth: { clientId: CLIENT_ID, authority: `https://login.microsoftonline.com/${TENANT_ID}`, redirectUri: REDIRECT },
+      cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: false }
+    });
+    await msalInstance.initialize();
+    const resp = await msalInstance.handleRedirectPromise();
+    if (resp) {
+      currentAccount = resp.account;
+    } else {
+      const accounts = msalInstance.getAllAccounts();
+      if (accounts.length > 0) currentAccount = accounts[0];
+    }
+    if (currentAccount) {
+      await loadAfterAuth();
+    } else {
+      renderLoginWall();
+      ss('err', 'sign in to continue');
+    }
+  } catch(e) {
+    showErr('Init error: ' + e.message);
+    ss('err', 'error');
+  }
 }
 
-async function getDigest() {
-  if (digest) return digest;
-  const r = await fetch(SITE_URL + '/_api/contextinfo', {
-    method: 'POST',
-    headers: {'Accept':'application/json;odata=nometadata'},
-    credentials: 'include'
-  });
-  const d = await r.json();
-  digest = d.FormDigestValue;
-  setTimeout(() => { digest = ''; }, 25 * 60 * 1000);
-  return digest;
+async function signIn() {
+  try { await msalInstance.loginRedirect({ scopes: SCOPES }); }
+  catch(e) { showErr('Sign-in failed: ' + e.message); }
 }
 
-async function spWrite(path, body, method) {
-  const dg = await getDigest();
-  const headers = {
-    'Accept': 'application/json;odata=nometadata',
-    'Content-Type': 'application/json;odata=nometadata',
-    'X-RequestDigest': dg,
-  };
-  if (method === 'MERGE') { headers['IF-MATCH'] = '*'; headers['X-HTTP-Method'] = 'MERGE'; }
-  if (method === 'DELETE') { headers['IF-MATCH'] = '*'; headers['X-HTTP-Method'] = 'DELETE'; }
-  const r = await fetch(SITE_URL + path, {
-    method: (method === 'MERGE' || method === 'DELETE') ? 'POST' : method,
-    headers, credentials: 'include',
-    body: body ? JSON.stringify(body) : undefined
+function signOut() { msalInstance.logoutRedirect(); }
+
+async function getToken() {
+  try {
+    const r = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: currentAccount });
+    return r.accessToken;
+  } catch(e) {
+    await msalInstance.acquireTokenRedirect({ scopes: SCOPES, account: currentAccount });
+    return null;
+  }
+}
+
+async function loadAfterAuth() {
+  currentUser = currentAccount.name || currentAccount.username.split('@')[0];
+  document.getElementById('auth-area').innerHTML = `
+    <div class="user-chip"><div class="u-dot"></div>${x(currentUser)}</div>
+    <button class="btn-so" onclick="signOut()">Sign out</button>`;
+  await loadData();
+}
+
+function renderLoginWall() {
+  document.getElementById('root').innerHTML = `
+    <div class="login-wall">
+      <h2>ILS Teacher Printer Sale</h2>
+      <p>Sign in with your ILS Microsoft account to view and claim printers.</p>
+      <button class="btn-si-lg" onclick="signIn()">Sign in with Microsoft</button>
+    </div>`;
+}
+
+// ── Graph API ────────────────────────────────────────────────────
+async function gFetch(path, opts = {}) {
+  const token = await getToken();
+  if (!token) return null;
+  const r = await fetch('https://graph.microsoft.com/v1.0' + path, {
+    ...opts,
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', ...(opts.headers||{}) }
   });
-  if (!r.ok) { const t = await r.text(); throw new Error('SP ' + r.status + ': ' + t.slice(0,200)); }
+  if (!r.ok) { const t = await r.text(); throw new Error('Graph ' + r.status + ': ' + t.slice(0,200)); }
   if (r.status === 204) return null;
   return r.json();
 }
 
-async function loadUser() {
-  const d = await spGet('/_api/web/currentuser?$select=Title');
-  currentUser = d.Title || 'Staff';
-  document.getElementById('user-name').textContent = currentUser;
-  document.getElementById('user-chip').style.display = 'flex';
+async function getSiteId() {
+  if (siteId) return siteId;
+  const d = await gFetch(`/sites/${SITE_HOST}:${SITE_PATH}`);
+  siteId = d.id; return siteId;
+}
+
+async function getListId() {
+  if (listId) return listId;
+  const sid = await getSiteId();
+  const d = await gFetch(`/sites/${sid}/lists?$filter=displayName eq '${LIST_NAME}'`);
+  if (!d.value || !d.value.length) throw new Error(`List "${LIST_NAME}" not found — did you create it in SharePoint?`);
+  listId = d.value[0].id; return listId;
 }
 
 async function fetchClaims() {
-  const d = await spGet(`/_api/web/lists/getbytitle('${LIST_NAME}')/items?$select=Id,Title,PrinterId,ClaimedBy&$top=100`);
+  const sid = await getSiteId(), lid = await getListId();
+  const d = await gFetch(`/sites/${sid}/lists/${lid}/items?$expand=fields&$top=100`);
   const nc = {}, ni = {};
-  (d.value || []).forEach(item => {
-    if (item.PrinterId) { nc[item.PrinterId] = item.ClaimedBy || ''; ni[item.PrinterId] = item.Id; }
+  (d.value||[]).forEach(item => {
+    const f = item.fields;
+    if (f && f.PrinterId) { nc[f.PrinterId] = f.ClaimedBy || ''; ni[f.PrinterId] = item.id; }
   });
   claims = nc; itemIds = ni;
 }
 
 async function writeClaim(pid, by) {
-  const body = { Title: pid, PrinterId: pid, ClaimedBy: by };
+  const sid = await getSiteId(), lid = await getListId();
+  const body = { fields: { Title: pid, PrinterId: pid, ClaimedBy: by } };
   if (itemIds[pid]) {
-    await spWrite(`/_api/web/lists/getbytitle('${LIST_NAME}')/items(${itemIds[pid]})`, body, 'MERGE');
+    await gFetch(`/sites/${sid}/lists/${lid}/items/${itemIds[pid]}`, { method: 'PATCH', body: JSON.stringify(body) });
   } else {
-    const res = await spWrite(`/_api/web/lists/getbytitle('${LIST_NAME}')/items`, body, 'POST');
-    itemIds[pid] = res.Id;
+    const res = await gFetch(`/sites/${sid}/lists/${lid}/items`, { method: 'POST', body: JSON.stringify(body) });
+    itemIds[pid] = res.id;
   }
   claims[pid] = by;
 }
 
 async function deleteClaim(pid) {
+  const sid = await getSiteId(), lid = await getListId();
   if (!itemIds[pid]) return;
-  await spWrite(`/_api/web/lists/getbytitle('${LIST_NAME}')/items(${itemIds[pid]})`, null, 'DELETE');
+  await gFetch(`/sites/${sid}/lists/${lid}/items/${itemIds[pid]}`, { method: 'DELETE' });
   delete claims[pid]; delete itemIds[pid];
 }
 
+// ── Data ─────────────────────────────────────────────────────────
+async function loadData() {
+  ss('spin', 'loading...');
+  try {
+    await fetchClaims();
+    render();
+    ss('ok', 'live · syncs for everyone');
+    setInterval(async () => {
+      try { await fetchClaims(); render(); ss('ok','live · syncs for everyone'); }
+      catch(e) { ss('err','sync error'); }
+    }, 10000);
+  } catch(e) {
+    ss('err', 'connection error');
+    showErr(e.message);
+    render();
+  }
+}
+
+// ── Render ───────────────────────────────────────────────────────
 function render() {
+  if (!currentAccount) return;
   const groups = [...new Set(PRINTERS.map(p => p.g))];
   let html = '', avail = 0, claimed = 0;
   groups.forEach(g => {
@@ -269,6 +355,7 @@ function render() {
   document.getElementById('s-claimed').textContent = claimed;
 }
 
+// ── Claim flow ───────────────────────────────────────────────────
 function doClaim(id) {
   pendingId = id;
   const p = PRINTERS.find(p => p.id === id);
@@ -304,22 +391,6 @@ function toast(msg, isErr) {
   t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3000);
 }
 function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-async function boot() {
-  ss('spin','connecting...');
-  try {
-    await Promise.all([loadUser(), fetchClaims()]);
-    render();
-    ss('ok','live · syncs for everyone');
-    setInterval(async () => {
-      try { await fetchClaims(); render(); ss('ok','live · syncs for everyone'); }
-      catch(e) { ss('err','sync error'); }
-    }, 10000);
-  } catch(e) {
-    ss('err','connection error');
-    showErr('Could not connect to SharePoint: ' + e.message + ' — make sure you are viewing this page while logged into SharePoint.');
-  }
-}
 
 boot();
 </script>
