@@ -151,6 +151,367 @@ const TENANT_ID  = '8109e949-d281-46a4-af75-b18087925bf4';
 const REDIRECT   = 'https://orojas119.github.io/printer-catalog/';
 const SITE_HOST  = 'ilsroyals.sharepoint.com';
 const SITE_PATH  = '/sites/ilsforms';
+const LIST_NAME  = 'Printer Claims';
+const SCOPES     = ['Sites.ReadWrite.All', 'User.Read'];
+
+const PRINTERS = [
+  {id:'p1', g:'Group 1: Large & premium', name:'HP PageWide Pro MFP 577 dw', price:135, market:460, disc:71, toner:'972/976 XL', tCost:125, carts:7, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c05016569.png?imdensity=1&impolicy=Png_Res'},
+  {id:'p2', g:'Group 1: Large & premium', name:'HP Color LaserJet Pro MFP M477fdn', price:155, market:510, disc:70, toner:'410 / 410a', tCost:120, carts:5, img:'https://hp.widen.net/content/sgniyiwlxa/webp/sgniyiwlxa.png?w=573&h=430&dpi=72&color=ffffff00'},
+  {id:'p3', g:'Group 1: Large & premium', name:'HP LaserJet Pro MFP M428fdw', price:145, market:390, disc:63, toner:'58x', tCost:38, carts:0, img:'https://m.media-amazon.com/images/I/71w7y3hV8DL._AC_UF894,1000_QL80_.jpg'},
+  {id:'p4', g:'Group 1: Large & premium', name:'Canon ImageCLASS X MF1643i II', price:135, market:430, disc:69, toner:'T06 Black', tCost:80, carts:0, img:'https://s7d1.scene7.com/is/image/canon/imageclass-x-mf1643i-ii-cusa-main-angle?wid=400'},
+  {id:'p5', g:'Group 1: Large & premium', name:'HP OfficeJet Pro X476dw / X551dw', price:95, market:240, disc:60, toner:'970/971 or XL', tCost:95, carts:8, img:'https://webobjects2.cdw.com/is/image/CDW/7039669?$product-main$'},
+  {id:'p6', g:'Group 2: Medium & compact', name:'HP OfficeJet Pro 8710 / 8630', price:55, market:165, disc:67, toner:'952 or 950/951', tCost:65, carts:1, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c03956278.png?imdensity=1&impolicy=Png_Res'},
+  {id:'p7', g:'Group 2: Medium & compact', name:'HP LaserJet Pro MFP 4101fdne', price:85, market:320, disc:73, toner:'148A', tCost:65, carts:0, img:'https://m.media-amazon.com/images/I/61Rl77fgjEL._AC_UF894,1000_QL80_.jpg'},
+  {id:'p8', g:'Group 2: Medium & compact', name:'HP LaserJet Pro M404n', price:65, market:185, disc:65, toner:'58', tCost:40, carts:0, img:'https://media.officedepot.com/images/f_auto,q_auto,e_sharpen,h_450/products/9637825/9637825_o01_hp_laserjet_pro_m404n_monochrome_laser_printer_100219/9637825'},
+  {id:'p9', g:'Group 2: Medium & compact', name:'HP LaserJet Pro 400 M401n', price:55, market:95, disc:42, toner:'80x', tCost:45, carts:0, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c04998947.png'},
+  {id:'p10',g:'Group 2: Medium & compact', name:'HP LaserJet Pro 200 color MFP M276mw', price:45, market:140, disc:68, toner:'131A', tCost:85, carts:0, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c03122578.png?imdensity=1&impolicy=Png_Res'},
+  {id:'p11',g:'Group 3: Budget / older models', name:'HP LaserJet 1536dnf MFP', price:28, market:50, disc:44, toner:'78A', tCost:35, carts:0, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c02944267.png'},
+];
+
+let msalInstance = null;
+let currentUser = '', currentAccount = null;
+let siteId = null, listId = null;
+let claims = {}, itemIds = {};
+let pendingId = null;
+
+// ── MSAL ────────────────────────────────────────────────────────
+async function boot() {
+  ss('spin', 'connecting...');
+  try {
+    msalInstance = new msal.PublicClientApplication({
+      auth: { clientId: CLIENT_ID, authority: `https://login.microsoftonline.com/${TENANT_ID}`, redirectUri: REDIRECT },
+      cache: { cacheLocation: 'sessionStorage', storeAuthStateInCookie: false }
+    });
+    await msalInstance.initialize();
+    const resp = await msalInstance.handleRedirectPromise();
+    if (resp) {
+      currentAccount = resp.account;
+    } else {
+      const accounts = msalInstance.getAllAccounts();
+      if (accounts.length > 0) currentAccount = accounts[0];
+    }
+    if (currentAccount) {
+      await loadAfterAuth();
+    } else {
+      renderLoginWall();
+      ss('err', 'sign in to continue');
+    }
+  } catch(e) {
+    showErr('Init error: ' + e.message);
+    ss('err', 'error');
+  }
+}
+
+async function signIn() {
+  try { await msalInstance.loginRedirect({ scopes: SCOPES }); }
+  catch(e) { showErr('Sign-in failed: ' + e.message); }
+}
+
+function signOut() { msalInstance.logoutRedirect(); }
+
+async function getToken() {
+  try {
+    const r = await msalInstance.acquireTokenSilent({ scopes: SCOPES, account: currentAccount });
+    return r.accessToken;
+  } catch(e) {
+    await msalInstance.acquireTokenRedirect({ scopes: SCOPES, account: currentAccount });
+    return null;
+  }
+}
+
+async function loadAfterAuth() {
+  currentUser = currentAccount.name || currentAccount.username.split('@')[0];
+  document.getElementById('auth-area').innerHTML = `
+    <div class="user-chip"><div class="u-dot"></div>${x(currentUser)}</div>
+    <button class="btn-so" onclick="signOut()">Sign out</button>`;
+  await loadData();
+}
+
+function renderLoginWall() {
+  document.getElementById('root').innerHTML = `
+    <div class="login-wall">
+      <h2>ILS Teacher Printer Sale</h2>
+      <p>Sign in with your ILS Microsoft account to view and claim printers.</p>
+      <button class="btn-si-lg" onclick="signIn()">Sign in with Microsoft</button>
+    </div>`;
+}
+
+// ── Graph API ────────────────────────────────────────────────────
+async function gFetch(path, opts = {}) {
+  const token = await getToken();
+  if (!token) return null;
+  const r = await fetch('https://graph.microsoft.com/v1.0' + path, {
+    ...opts,
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', ...(opts.headers||{}) }
+  });
+  if (!r.ok) { const t = await r.text(); throw new Error('Graph ' + r.status + ': ' + t.slice(0,200)); }
+  if (r.status === 204) return null;
+  return r.json();
+}
+
+async function getSiteId() {
+  if (siteId) return siteId;
+  const d = await gFetch(`/sites/${SITE_HOST}:${SITE_PATH}`);
+  siteId = d.id; return siteId;
+}
+
+async function getListId() {
+  if (listId) return listId;
+  const sid = await getSiteId();
+  const d = await gFetch(`/sites/${sid}/lists?$filter=displayName eq '${LIST_NAME}'`);
+  if (!d.value || !d.value.length) throw new Error(`List "${LIST_NAME}" not found — did you create it in SharePoint?`);
+  listId = d.value[0].id; return listId;
+}
+
+async function fetchClaims() {
+  const sid = await getSiteId(), lid = await getListId();
+  const d = await gFetch(`/sites/${sid}/lists/${lid}/items?$expand=fields&$top=100`);
+  const nc = {}, ni = {};
+  (d.value||[]).forEach(item => {
+    const f = item.fields;
+    if (f && f.PrinterId) { nc[f.PrinterId] = f.ClaimedBy || ''; ni[f.PrinterId] = item.id; }
+  });
+  claims = nc; itemIds = ni;
+}
+
+async function writeClaim(pid, by) {
+  const sid = await getSiteId(), lid = await getListId();
+  const body = { fields: { Title: pid, PrinterId: pid, ClaimedBy: by } };
+  if (itemIds[pid]) {
+    await gFetch(`/sites/${sid}/lists/${lid}/items/${itemIds[pid]}`, { method: 'PATCH', body: JSON.stringify(body) });
+  } else {
+    const res = await gFetch(`/sites/${sid}/lists/${lid}/items`, { method: 'POST', body: JSON.stringify(body) });
+    itemIds[pid] = res.id;
+  }
+  claims[pid] = by;
+}
+
+async function deleteClaim(pid) {
+  const sid = await getSiteId(), lid = await getListId();
+  if (!itemIds[pid]) return;
+  await gFetch(`/sites/${sid}/lists/${lid}/items/${itemIds[pid]}`, { method: 'DELETE' });
+  delete claims[pid]; delete itemIds[pid];
+}
+
+// ── Data ─────────────────────────────────────────────────────────
+async function loadData() {
+  ss('spin', 'loading...');
+  try {
+    await fetchClaims();
+    render();
+    ss('ok', 'live · syncs for everyone');
+    setInterval(async () => {
+      try { await fetchClaims(); render(); ss('ok','live · syncs for everyone'); }
+      catch(e) { ss('err','sync error'); }
+    }, 10000);
+  } catch(e) {
+    ss('err', 'connection error');
+    showErr(e.message);
+    render();
+  }
+}
+
+// ── Render ───────────────────────────────────────────────────────
+function render() {
+  if (!currentAccount) return;
+  const groups = [...new Set(PRINTERS.map(p => p.g))];
+  let html = '', avail = 0, claimed = 0;
+  groups.forEach(g => {
+    html += `<div class="grp">${x(g)}</div>`;
+    PRINTERS.filter(p => p.g === g).forEach(p => {
+      const by = claims[p.id];
+      const mine = by && by === currentUser;
+      const taken = !!by && !mine;
+      if (by) claimed++; else avail++;
+      const cls = mine ? 'card mine' : taken ? 'card taken' : 'card';
+      const cb = p.carts > 0 ? `<span class="b bc">${p.carts} cartridge${p.carts>1?'s':''} included</span>` : '';
+      let act = '';
+      if (mine) act = `<div class="tag-mine"><div class="dot-g"></div>Claimed by you</div><button class="btn-release" onclick="doRelease('${p.id}')">Release</button>`;
+      else if (taken) act = `<div class="tag-taken"><div class="dot-r"></div>Claimed by <strong style="margin-left:3px">${x(by)}</strong></div>`;
+      else act = `<button class="btn-claim" onclick="doClaim('${p.id}')">Claim this printer</button>`;
+      html += `<div class="${cls}">
+        <img class="pimg" src="${p.img}" alt="${x(p.name)}" onerror="this.style.display='none'">
+        <div class="pbody">
+          <div class="pname">${x(p.name)}</div>
+          <div class="bads">
+            <span class="b bp">$${p.price}</span>
+            <span class="b bm">Market ~$${p.market}</span>
+            <span class="b bd">${p.disc}% off</span>
+            <span class="b bt">${x(p.toner)} · replacement $${p.tCost}</span>
+            ${cb}
+          </div>
+          <div class="acts">${act}</div>
+        </div>
+      </div>`;
+    });
+  });
+  html += `<div class="disc"><h4>Important notes</h4><ul>
+    <li>These printers are for <strong>personal / home use only</strong>. Printing has been standardized on campus.</li>
+    <li><strong>No ongoing support</strong> after purchase. Questions before buying are welcome.</li>
+    <li>Replacement cartridges confirmed available for all models listed.</li>
+  </ul></div>`;
+  document.getElementById('root').innerHTML = html;
+  document.getElementById('s-avail').textContent = avail;
+  document.getElementById('s-claimed').textContent = claimed;
+}
+
+// ── Claim flow ───────────────────────────────────────────────────
+function doClaim(id) {
+  pendingId = id;
+  const p = PRINTERS.find(p => p.id === id);
+  document.getElementById('m-name').textContent = currentUser;
+  document.getElementById('m-printer').textContent = p.name;
+  document.getElementById('m-ok').disabled = false;
+  document.getElementById('m-ok').textContent = 'Claim printer';
+  document.getElementById('modal').style.display = 'flex';
+}
+function closeModal() { document.getElementById('modal').style.display = 'none'; pendingId = null; }
+async function confirmClaim() {
+  const btn = document.getElementById('m-ok');
+  btn.disabled = true; btn.textContent = 'Saving...';
+  ss('spin','saving...');
+  try { await writeClaim(pendingId, currentUser); closeModal(); render(); ss('ok','live · syncs for everyone'); toast('Printer claimed!'); }
+  catch(e) { closeModal(); ss('err','save failed'); toast('Error: '+e.message, true); }
+}
+async function doRelease(id) {
+  if (!confirm('Release your claim on this printer?')) return;
+  ss('spin','saving...');
+  try { await deleteClaim(id); render(); ss('ok','live · syncs for everyone'); toast('Claim released.'); }
+  catch(e) { ss('err','save failed'); toast('Error: '+e.message, true); }
+}
+
+function ss(state, label) {
+  document.getElementById('sdot').className = 'sdot'+(state==='spin'?' spin':state==='err'?' err':'');
+  document.getElementById('slabel').textContent = label;
+}
+function showErr(msg) { const e=document.getElementById('err-box'); e.style.display='block'; e.textContent='⚠ '+msg; }
+function toast(msg, isErr) {
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.className='toast'+(isErr?' terr':'');
+  t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),3000);
+}
+function x(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+boot();
+</script>
+</body>
+</html>  .sl { font-size:12px; color:rgba(255,255,255,0.55); }
+  .ssep { width:1px; height:18px; background:rgba(255,255,255,0.15); }
+  .sync { margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color:rgba(255,255,255,0.5); }
+  .sdot { width:6px; height:6px; border-radius:50%; background:#4ade80; }
+  .sdot.spin { background:var(--gold); animation:bl .8s infinite; }
+  .sdot.err { background:#f87171; }
+  @keyframes bl { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  .main { max-width:860px; margin:0 auto; padding:22px; }
+  .err-box { background:#fef2f2; border:1px solid #fca5a5; border-radius:var(--r); padding:14px 18px; margin-bottom:14px; font-size:13px; color:#991b1b; display:none; }
+
+  .login-wall { text-align:center; padding:60px 24px; background:white; border-radius:var(--r); border:1px solid var(--border); }
+  .login-wall h2 { font-size:18px; font-weight:700; margin-bottom:8px; color:var(--gd); }
+  .login-wall p { color:var(--text-m); margin-bottom:24px; font-size:14px; }
+  .btn-si-lg { background:var(--gd); color:white; border:none; border-radius:var(--rs); padding:12px 28px; font-size:15px; font-weight:700; cursor:pointer; font-family:inherit; }
+  .btn-si-lg:hover { background:var(--gm); }
+
+  .grp { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; color:var(--text-l); margin:26px 0 10px; padding-bottom:7px; border-bottom:1px solid var(--border); }
+  .grp:first-child { margin-top:0; }
+
+  .card { background:white; border:1px solid var(--border); border-radius:var(--r); padding:15px; margin-bottom:9px; display:flex; gap:14px; align-items:flex-start; transition:border-color .15s,opacity .2s,box-shadow .15s; box-shadow:var(--sh); }
+  .card:hover { border-color:var(--border-m); box-shadow:var(--shh); }
+  .card.taken { opacity:.52; background:#fafafa; }
+  .card.mine { border-color:var(--gold-d); background:var(--gold-l); }
+  .pimg { width:78px; height:58px; object-fit:contain; flex-shrink:0; border-radius:var(--rs); background:#f5f5f5; padding:4px; }
+  .pbody { flex:1; min-width:0; }
+  .pname { font-size:14px; font-weight:600; color:var(--text); margin-bottom:7px; line-height:1.3; }
+  .bads { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:9px; }
+  .b { font-size:11px; font-weight:600; padding:3px 8px; border-radius:20px; white-space:nowrap; }
+  .bp { background:#dcfce7; color:#166534; }
+  .bm { background:#f1f5f9; color:#475569; }
+  .bd { background:#dbeafe; color:#1d4ed8; }
+  .bt { background:#f3f4f6; color:#374151; font-weight:400; }
+  .bc { background:#fef9c3; color:#854d0e; }
+
+  .acts { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .btn-claim { font-size:12px; padding:5px 15px; border-radius:var(--rs); border:none; background:var(--gd); color:white; cursor:pointer; font-family:inherit; font-weight:600; transition:background .12s; }
+  .btn-claim:hover { background:var(--gm); }
+  .btn-release { font-size:12px; padding:5px 15px; border-radius:var(--rs); border:1px solid #fca5a5; background:transparent; color:#b91c1c; cursor:pointer; font-family:inherit; transition:background .12s; }
+  .btn-release:hover { background:#fef2f2; }
+  .tag-taken { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--text-m); }
+  .tag-mine { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--gold-d); font-weight:600; }
+  .dot-r { width:6px; height:6px; border-radius:50%; background:#dc2626; flex-shrink:0; }
+  .dot-g { width:6px; height:6px; border-radius:50%; background:var(--gold-d); flex-shrink:0; }
+
+  .mbk { position:fixed; inset:0; background:rgba(0,0,0,0.38); z-index:200; display:flex; align-items:center; justify-content:center; padding:16px; }
+  .mdl { background:white; border-radius:var(--r); padding:22px; width:100%; max-width:350px; box-shadow:0 20px 60px rgba(0,0,0,0.18); }
+  .mdl h3 { font-size:15px; font-weight:700; color:var(--gd); margin-bottom:5px; }
+  .mdl p { font-size:13px; color:var(--text-m); margin-bottom:12px; }
+  .mname { background:var(--cream); border:1px solid var(--border); border-radius:var(--rs); padding:9px 13px; font-size:14px; font-weight:600; color:var(--gd); margin-bottom:12px; }
+  .mprinter { font-size:13px; color:#374151; margin-bottom:16px; }
+  .mbtns { display:flex; gap:8px; justify-content:flex-end; }
+  .mbtns button { font-size:13px; padding:7px 16px; border-radius:var(--rs); border:1px solid var(--border-m); background:white; cursor:pointer; font-family:inherit; color:var(--text-m); }
+  .mbtns .ok { background:var(--gd); border-color:var(--gd); color:white; font-weight:600; }
+  .mbtns .ok:hover { background:var(--gm); }
+  .mbtns .ok:disabled { background:#9ca3af; border-color:#9ca3af; cursor:not-allowed; }
+
+  .toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(70px); background:var(--gd); color:white; padding:9px 18px; border-radius:20px; font-size:13px; font-weight:500; z-index:300; transition:transform .22s; pointer-events:none; white-space:nowrap; }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  .toast.terr { background:#dc2626; }
+
+  .disc { background:var(--gd); color:white; border-radius:var(--r); padding:16px 18px; margin-top:28px; font-size:13px; }
+  .disc h4 { font-size:13px; font-weight:700; color:var(--gold); margin-bottom:7px; }
+  .disc li { margin-left:16px; margin-bottom:3px; color:rgba(255,255,255,0.75); }
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="hdr-in">
+    <div>
+      <h1>Teacher Printer Sale</h1>
+      <p>ILS staff only &nbsp;·&nbsp; Claim a printer below &nbsp;·&nbsp; Updates live for everyone</p>
+    </div>
+    <div class="auth-area" id="auth-area">
+      <button class="btn-si" onclick="signIn()">Sign in with Microsoft</button>
+    </div>
+  </div>
+</div>
+
+<div class="sbar">
+  <div class="sbar-in">
+    <div class="st"><span class="sn" id="s-avail">—</span><span class="sl">available</span></div>
+    <div class="ssep"></div>
+    <div class="st"><span class="sn" id="s-claimed">—</span><span class="sl">claimed</span></div>
+    <div class="ssep"></div>
+    <div class="st"><span class="sn">11</span><span class="sl">total</span></div>
+    <div class="sync"><div class="sdot spin" id="sdot"></div><span id="slabel">connecting...</span></div>
+  </div>
+</div>
+
+<div class="main">
+  <div class="err-box" id="err-box"></div>
+  <div id="root"></div>
+</div>
+
+<div class="mbk" id="modal" style="display:none">
+  <div class="mdl">
+    <h3>Confirm claim</h3>
+    <p>You're claiming this printer as:</p>
+    <div class="mname" id="m-name"></div>
+    <div class="mprinter" id="m-printer"></div>
+    <div class="mbtns">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="ok" id="m-ok" onclick="confirmClaim()">Claim printer</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const CLIENT_ID  = 'cfad736d-bf0f-4306-94fe-1b7a02a522f2';
+const TENANT_ID  = '8109e949-d281-46a4-af75-b18087925bf4';
+const REDIRECT   = 'https://orojas119.github.io/printer-catalog/';
+const SITE_HOST  = 'ilsroyals.sharepoint.com';
+const SITE_PATH  = '/sites/ilsforms';
 const LIST_NAME  = 'PrinterClaims';
 const SCOPES     = ['Sites.ReadWrite.All', 'User.Read'];
 
