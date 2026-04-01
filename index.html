@@ -152,7 +152,8 @@ const REDIRECT   = 'https://orojas119.github.io/printer-catalog/';
 const SITE_HOST  = 'ilsroyals.sharepoint.com';
 const SITE_PATH  = '/sites/ilsforms';
 const LIST_NAME  = 'Printer Claims';
-const SCOPES     = ['Sites.ReadWrite.All', 'User.Read'];
+const SCOPES     = ['Sites.ReadWrite.All', 'User.Read', 'Mail.Send'];
+const CC_EMAIL   = 'orojas@ilsroyals.com';
 
 const PRINTERS = [
   {id:'p1', g:'Group 1: Large & premium', name:'HP PageWide Pro MFP 577 dw', price:135, market:460, disc:71, toner:'972/976 XL', tCost:125, carts:7, img:'https://ssl-product-images.www8-hp.com/digmedialib/prodimg/lowres/c05016569.png?imdensity=1&impolicy=Png_Res'},
@@ -263,20 +264,39 @@ async function getListId() {
   listId = d.value[0].id; return listId;
 }
 
+let printerField = null, claimedField = null;
+
+async function resolveFieldNames() {
+  if (printerField && claimedField) return;
+  const sid = await getSiteId(), lid = await getListId();
+  const d = await gFetch(`/sites/${sid}/lists/${lid}/columns?$select=name,displayName`);
+  (d.value||[]).forEach(c => {
+    const dn = c.displayName.toLowerCase().replace(/\s/g,'');
+    if (dn === 'printerid') printerField = c.name;
+    if (dn === 'claimedby') claimedField = c.name;
+  });
+  if (!printerField) printerField = 'PrinterId';
+  if (!claimedField) claimedField = 'ClaimedBy';
+}
+
 async function fetchClaims() {
+  await resolveFieldNames();
   const sid = await getSiteId(), lid = await getListId();
   const d = await gFetch(`/sites/${sid}/lists/${lid}/items?$expand=fields&$top=100`);
   const nc = {}, ni = {};
   (d.value||[]).forEach(item => {
     const f = item.fields;
-    if (f && f.PrinterId) { nc[f.PrinterId] = f.ClaimedBy || ''; ni[f.PrinterId] = item.id; }
+    const pid = f[printerField];
+    const by  = f[claimedField] || '';
+    if (pid) { nc[pid] = by; ni[pid] = item.id; }
   });
   claims = nc; itemIds = ni;
 }
 
 async function writeClaim(pid, by) {
+  await resolveFieldNames();
   const sid = await getSiteId(), lid = await getListId();
-  const body = { fields: { Title: pid, PrinterId: pid, ClaimedBy: by } };
+  const body = { fields: { Title: pid, [printerField]: pid, [claimedField]: by } };
   if (itemIds[pid]) {
     await gFetch(`/sites/${sid}/lists/${lid}/items/${itemIds[pid]}`, { method: 'PATCH', body: JSON.stringify(body) });
   } else {
@@ -366,11 +386,61 @@ function doClaim(id) {
   document.getElementById('modal').style.display = 'flex';
 }
 function closeModal() { document.getElementById('modal').style.display = 'none'; pendingId = null; }
+async function sendClaimEmail(printer) {
+  const token = await getToken();
+  if (!token) return;
+  const userEmail = currentAccount.username;
+  const subject = `Your printer claim: ${printer.name}`;
+  const body = `
+    <div style="font-family:Segoe UI,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#0F3A2F;padding:20px 24px;border-radius:8px 8px 0 0;">
+        <h2 style="color:#F4C542;margin:0;font-size:20px;">Printer Claim Confirmed</h2>
+        <p style="color:rgba(255,255,255,0.7);margin:4px 0 0;font-size:13px;">ILS Teacher Printer Sale</p>
+      </div>
+      <div style="background:#f7f4ed;padding:24px;border-radius:0 0 8px 8px;border:1px solid #e0ddd6;">
+        <p style="margin:0 0 16px;">Hi ${currentUser},</p>
+        <p style="margin:0 0 20px;">Your claim has been confirmed for the following printer:</p>
+        <div style="background:white;border:1px solid #ddd;border-radius:8px;padding:16px 20px;margin-bottom:20px;">
+          <p style="font-size:17px;font-weight:700;margin:0 0 12px;color:#0F3A2F;">${printer.name}</p>
+          <table style="font-size:13px;width:100%;border-collapse:collapse;">
+            <tr><td style="color:#666;padding:4px 0;width:140px;">Your price</td><td style="font-weight:600;color:#166534;">$${printer.price}</td></tr>
+            <tr><td style="color:#666;padding:4px 0;">Market value</td><td>~$${printer.market}</td></tr>
+            <tr><td style="color:#666;padding:4px 0;">Savings</td><td style="color:#1d4ed8;">${printer.disc}% off</td></tr>
+            <tr><td style="color:#666;padding:4px 0;">Replacement toner</td><td>${printer.toner} (~$${printer.tCost})</td></tr>
+            ${printer.carts > 0 ? `<tr><td style="color:#666;padding:4px 0;">Cartridges included</td><td style="color:#854d0e;">${printer.carts} cartridge${printer.carts>1?'s':''} included</td></tr>` : ''}
+          </table>
+        </div>
+        <p style="margin:0 0 8px;">We will be in contact with you soon to arrange delivery of your printer.</p>
+        <p style="margin:0 0 20px;color:#666;font-size:13px;">If you have any questions in the meantime, please reach out to Oscar Rojas at orojas@ilsroyals.com.</p>
+        <p style="margin:0;color:#888;font-size:12px;">— ILS Technology Department</p>
+      </div>
+    </div>`;
+
+  await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: {
+        subject,
+        body: { contentType: 'HTML', content: body },
+        toRecipients: [{ emailAddress: { address: userEmail } }],
+        ccRecipients: [{ emailAddress: { address: CC_EMAIL } }]
+      },
+      saveToSentItems: true
+    })
+  });
+}
+
 async function confirmClaim() {
   const btn = document.getElementById('m-ok');
   btn.disabled = true; btn.textContent = 'Saving...';
   ss('spin','saving...');
-  try { await writeClaim(pendingId, currentUser); closeModal(); render(); ss('ok','live · syncs for everyone'); toast('Printer claimed!'); }
+  try {
+    await writeClaim(pendingId, currentUser);
+    const printer = PRINTERS.find(p => p.id === pendingId);
+    closeModal(); render(); ss('ok','live · syncs for everyone'); toast('Printer claimed! Confirmation email sent.');
+    sendClaimEmail(printer).catch(e => console.warn('Email failed:', e));
+  }
   catch(e) { closeModal(); ss('err','save failed'); toast('Error: '+e.message, true); }
 }
 async function doRelease(id) {
